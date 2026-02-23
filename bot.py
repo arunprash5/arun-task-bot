@@ -14,7 +14,6 @@ from telegram.ext import (
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# TOKEN from Railway environment variable
 TOKEN = os.getenv("BOT_TOKEN")
 
 # ---------- DATABASE ----------
@@ -44,12 +43,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     user_id = update.message.from_user.id
 
-    # Save user so we know whom to send 7am reminders
     cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
     conn.commit()
 
     try:
-        # format: 24 Feb 2026 - Pay EB bill
         parts = user_text.split("-", 1)
         date_part = parts[0].strip()
         task_part = parts[1].strip()
@@ -108,30 +105,37 @@ async def send_upcoming_tasks(bot, user_id):
 
 
 # ---------- DAILY JOB ----------
-async def morning_reminder(app):
+async def morning_reminder(context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("SELECT user_id FROM users")
     users = cursor.fetchall()
 
     for (user_id,) in users:
-        await send_upcoming_tasks(app.bot, user_id)
+        await send_upcoming_tasks(context.bot, user_id)
 
 
-# ---------- SCHEDULER (IST TIMEZONE) ----------
-scheduler = AsyncIOScheduler(timezone=ZoneInfo("Asia/Kolkata"))
-
-def start_scheduler(app):
-    # 7:00 AM IST every day
-    scheduler.add_job(morning_reminder, "cron", hour=7, minute=0, args=[app])
+# ---------- START SCHEDULER AFTER LOOP READY ----------
+async def post_init(application):
+    scheduler = AsyncIOScheduler(timezone=ZoneInfo("Asia/Kolkata"))
+    scheduler.add_job(
+        morning_reminder,
+        "cron",
+        hour=7,
+        minute=0,
+        args=[application],
+    )
     scheduler.start()
 
 
 # ---------- APP ----------
-app = ApplicationBuilder().token(TOKEN).build()
+app = (
+    ApplicationBuilder()
+    .token(TOKEN)
+    .post_init(post_init)
+    .build()
+)
 
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(CommandHandler("week", week_tasks))
-
-start_scheduler(app)
 
 print("Bot is running...")
 app.run_polling()
