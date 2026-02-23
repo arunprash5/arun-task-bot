@@ -1,5 +1,8 @@
+import os
 import sqlite3
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -9,10 +12,13 @@ from telegram.ext import (
     ContextTypes,
 )
 
-TOKEN = "8695529169:AAHoQeVxDMcbz4gGZDIs8TLOrRvDiqNBxuk"
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# ---------- DATABASE SETUP ----------
-conn = sqlite3.connect("tasks.db")
+# TOKEN from Railway environment variable
+TOKEN = os.getenv("BOT_TOKEN")
+
+# ---------- DATABASE ----------
+conn = sqlite3.connect("tasks.db", check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -23,6 +29,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     task_date TEXT
 )
 """)
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY
+)
+""")
+
 conn.commit()
 
 
@@ -31,10 +44,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     user_id = update.message.from_user.id
 
-    try:
-        # Expecting format: 24 Feb 2026 - Pay EB bill
-        parts = user_text.split("-", 1)
+    # Save user so we know whom to send 7am reminders
+    cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+    conn.commit()
 
+    try:
+        # format: 24 Feb 2026 - Pay EB bill
+        parts = user_text.split("-", 1)
         date_part = parts[0].strip()
         task_part = parts[1].strip()
 
@@ -48,7 +64,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text("Task saved ✅")
 
-    except:
+    except Exception:
         await update.message.reply_text(
             "Send in this format:\n\n24 Feb 2026 - Pay EB bill"
         )
@@ -57,8 +73,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------- WEEK COMMAND ----------
 async def week_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
+    await send_upcoming_tasks(context.bot, user_id)
 
-    today = datetime.today().date()
+
+# ---------- CORE FUNCTION ----------
+async def send_upcoming_tasks(bot, user_id):
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
     end_date = today + timedelta(days=7)
 
     cursor.execute("""
@@ -75,16 +95,34 @@ async def week_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = cursor.fetchall()
 
     if not rows:
-        await update.message.reply_text("No tasks in next 7 days 🎉")
+        await bot.send_message(chat_id=user_id, text="No tasks in next 7 days 🎉")
         return
 
-    message = "Your next 7 days tasks:\n\n"
+    message = "🌅 Good morning!\n\nYour next 7 days tasks:\n\n"
 
     for task, date in rows:
         formatted_date = datetime.strptime(date, "%Y-%m-%d").strftime("%d %b")
         message += f"{formatted_date} - {task}\n"
 
-    await update.message.reply_text(message)
+    await bot.send_message(chat_id=user_id, text=message)
+
+
+# ---------- DAILY JOB ----------
+async def morning_reminder(app):
+    cursor.execute("SELECT user_id FROM users")
+    users = cursor.fetchall()
+
+    for (user_id,) in users:
+        await send_upcoming_tasks(app.bot, user_id)
+
+
+# ---------- SCHEDULER (IST TIMEZONE) ----------
+scheduler = AsyncIOScheduler(timezone=ZoneInfo("Asia/Kolkata"))
+
+def start_scheduler(app):
+    # 7:00 AM IST every day
+    scheduler.add_job(morning_reminder, "cron", hour=7, minute=0, args=[app])
+    scheduler.start()
 
 
 # ---------- APP ----------
@@ -92,6 +130,8 @@ app = ApplicationBuilder().token(TOKEN).build()
 
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(CommandHandler("week", week_tasks))
+
+start_scheduler(app)
 
 print("Bot is running...")
 app.run_polling()
