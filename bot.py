@@ -3,11 +3,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 
 from telegram.ext import (
     ApplicationBuilder,
@@ -52,24 +48,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
 
     await update.message.reply_text(
-        "Task Manager\n\nChoose:",
+        "Task Manager\n\nChoose an option:",
         reply_markup=keyboard
     )
 
+
 # ---------------- MENU ----------------
 
-async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
     await query.answer()
 
     if query.data == "add":
 
-        context.user_data["state"] = "adding_task"
+        context.user_data["state"] = "adding"
 
-        await query.message.reply_text(
-            "Send task description"
-        )
+        await query.message.reply_text("Send task description")
 
     elif query.data == "today":
 
@@ -79,15 +74,15 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await show_week(query.message)
 
+
 # ---------------- TEXT ROUTER ----------------
 
 async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     state = context.user_data.get("state")
 
-    # -------- ADD TASK --------
-
-    if state == "adding_task":
+    # ADD TASK
+    if state == "adding":
 
         task = update.message.text
 
@@ -95,6 +90,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["state"] = None
 
         calendar, step = DetailedTelegramCalendar(
+            calendar_id=1,
             min_date=datetime.now(),
             locale="en"
         ).build()
@@ -106,9 +102,8 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # -------- EDIT TASK --------
-
-    if state == "editing_task":
+    # EDIT TASK
+    if state == "editing":
 
         task_id = context.user_data["edit_id"]
         new_text = update.message.text
@@ -117,11 +112,13 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "UPDATE tasks SET task=? WHERE id=?",
             (new_text, task_id)
         )
+
         conn.commit()
 
         context.user_data["state"] = None
 
         await update.message.reply_text("Task updated ✏️")
+
 
 # ---------------- CALENDAR ----------------
 
@@ -130,7 +127,7 @@ async def calendar_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    result, key, step = DetailedTelegramCalendar().process(query.data)
+    result, key, step = DetailedTelegramCalendar(calendar_id=1).process(query.data)
 
     if not result and key:
 
@@ -152,6 +149,7 @@ async def calendar_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Task saved ✅\n\n{task}\n{result.strftime('%d %b %Y')}"
         )
 
+
 # ---------------- TODAY ----------------
 
 async def show_today(message):
@@ -166,7 +164,6 @@ async def show_today(message):
     rows = cursor.fetchall()
 
     if not rows:
-
         await message.reply_text("No tasks today 🎉")
         return
 
@@ -180,6 +177,7 @@ async def show_today(message):
         ])
 
         await message.reply_text(task, reply_markup=keyboard)
+
 
 # ---------------- WEEK ----------------
 
@@ -201,8 +199,7 @@ async def show_week(message):
     rows = cursor.fetchall()
 
     if not rows:
-
-        await message.reply_text("No tasks this week 🎉")
+        await message.reply_text("No tasks next 7 days 🎉")
         return
 
     msg = "Next 7 Days\n\n"
@@ -214,6 +211,7 @@ async def show_week(message):
 
     await message.reply_text(msg)
 
+
 # ---------------- EDIT ----------------
 
 async def edit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -223,12 +221,11 @@ async def edit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     task_id = query.data.split("_")[1]
 
-    context.user_data["state"] = "editing_task"
+    context.user_data["state"] = "editing"
     context.user_data["edit_id"] = task_id
 
-    await query.message.reply_text(
-        "Send new task text"
-    )
+    await query.message.reply_text("Send new task text")
+
 
 # ---------------- DONE ----------------
 
@@ -243,9 +240,11 @@ async def done_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "UPDATE tasks SET status='completed' WHERE id=?",
         (task_id,)
     )
+
     conn.commit()
 
     await query.edit_message_text("Task completed ✅")
+
 
 # ---------------- REMINDER ----------------
 
@@ -266,6 +265,7 @@ async def reminder(context):
             chat_id=user_id,
             text=f"Reminder 🔔\n\n{task}"
         )
+
 
 # ---------------- EVENING CHECK ----------------
 
@@ -292,6 +292,7 @@ async def evening_check(context):
             reply_markup=keyboard
         )
 
+
 # ---------------- SCHEDULER ----------------
 
 async def post_init(application):
@@ -316,6 +317,7 @@ async def post_init(application):
 
     scheduler.start()
 
+
 # ---------------- APP ----------------
 
 app = (
@@ -327,11 +329,11 @@ app = (
 
 app.add_handler(CommandHandler("start", start))
 
-app.add_handler(CallbackQueryHandler(menu, pattern="^(add|today|week)$"))
+app.add_handler(CallbackQueryHandler(menu_handler, pattern="^(add|today|week)$"))
 app.add_handler(CallbackQueryHandler(edit_handler, pattern="^edit_"))
 app.add_handler(CallbackQueryHandler(done_handler, pattern="^done_"))
 
-app.add_handler(CallbackQueryHandler(calendar_handler))
+app.add_handler(CallbackQueryHandler(calendar_handler, pattern="^calendar"))
 
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
