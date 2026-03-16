@@ -1,5 +1,4 @@
 python-telegram-bot==20.7
 apscheduler
-dateparser
 python-telegram-bot-calendar
 pytz
