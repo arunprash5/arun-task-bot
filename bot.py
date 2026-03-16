@@ -3,25 +3,21 @@ import sqlite3
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
     MessageHandler,
+    CommandHandler,
+    filters,
     ContextTypes,
-    filters
 )
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from telegram_bot_calendar import DetailedTelegramCalendar
 
 
 TOKEN = os.getenv("BOT_TOKEN")
 
-# ---------------- DATABASE ----------------
-
+# ---------- DATABASE ----------
 conn = sqlite3.connect("tasks.db", check_same_thread=False)
 cursor = conn.cursor()
 
@@ -30,296 +26,137 @@ CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
     task TEXT,
-    task_date TEXT,
-    status TEXT DEFAULT 'pending'
+    task_date TEXT
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY
 )
 """)
 
 conn.commit()
 
-# ---------------- START ----------------
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ---------- SAVE TASK ----------
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Add Task", callback_data="add")],
-        [InlineKeyboardButton("📋 Today", callback_data="today")],
-        [InlineKeyboardButton("📅 Week", callback_data="week")]
-    ])
+    user_text = update.message.text
+    user_id = update.message.from_user.id
 
-    await update.message.reply_text(
-        "Task Manager\n\nChoose an option:",
-        reply_markup=keyboard
+    cursor.execute(
+        "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
+        (user_id,)
     )
+    conn.commit()
 
+    try:
+        parts = user_text.split("-", 1)
 
-# ---------------- MENU ----------------
+        date_part = parts[0].strip()
+        task_part = parts[1].strip()
 
-async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "add":
-
-        context.user_data["state"] = "adding"
-
-        await query.message.reply_text("Send task description")
-
-    elif query.data == "today":
-
-        await show_today(query.message)
-
-    elif query.data == "week":
-
-        await show_week(query.message)
-
-
-# ---------------- TEXT ROUTER ----------------
-
-async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    state = context.user_data.get("state")
-
-    # ADD TASK
-    if state == "adding":
-
-        task = update.message.text
-
-        context.user_data["task_text"] = task
-        context.user_data["state"] = None
-
-        calendar, step = DetailedTelegramCalendar(
-            calendar_id=1,
-            min_date=datetime.now(),
-            locale="en"
-        ).build()
-
-        await update.message.reply_text(
-            "Select task date",
-            reply_markup=calendar
-        )
-
-        return
-
-    # EDIT TASK
-    if state == "editing":
-
-        task_id = context.user_data["edit_id"]
-        new_text = update.message.text
-
-        cursor.execute(
-            "UPDATE tasks SET task=? WHERE id=?",
-            (new_text, task_id)
-        )
-
-        conn.commit()
-
-        context.user_data["state"] = None
-
-        await update.message.reply_text("Task updated ✏️")
-
-
-# ---------------- CALENDAR ----------------
-
-async def calendar_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    query = update.callback_query
-    await query.answer()
-
-    result, key, step = DetailedTelegramCalendar(calendar_id=1).process(query.data)
-
-    if not result and key:
-
-        await query.edit_message_reply_markup(reply_markup=key)
-
-    elif result:
-
-        task = context.user_data.get("task_text")
-        user_id = query.from_user.id
+        task_date = datetime.strptime(date_part, "%d %b %Y")
 
         cursor.execute(
             "INSERT INTO tasks (user_id, task, task_date) VALUES (?, ?, ?)",
-            (user_id, task, result.strftime("%Y-%m-%d"))
+            (
+                user_id,
+                task_part,
+                task_date.strftime("%Y-%m-%d")
+            )
         )
 
         conn.commit()
 
-        await query.edit_message_text(
-            f"Task saved ✅\n\n{task}\n{result.strftime('%d %b %Y')}"
+        await update.message.reply_text("Task saved ✅")
+
+    except Exception:
+
+        await update.message.reply_text(
+            "Send in this format:\n\n24 Feb 2026 - Pay EB bill"
         )
 
 
-# ---------------- TODAY ----------------
+# ---------- WEEK COMMAND ----------
+async def week_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-async def show_today(message):
+    user_id = update.message.from_user.id
 
-    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
-
-    cursor.execute("""
-    SELECT id, task FROM tasks
-    WHERE task_date=? AND status='pending'
-    """, (today.strftime("%Y-%m-%d"),))
-
-    rows = cursor.fetchall()
-
-    if not rows:
-        await message.reply_text("No tasks today 🎉")
-        return
-
-    for task_id, task in rows:
-
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✏️ Edit", callback_data=f"edit_{task_id}"),
-                InlineKeyboardButton("✅ Done", callback_data=f"done_{task_id}")
-            ]
-        ])
-
-        await message.reply_text(task, reply_markup=keyboard)
+    await send_upcoming_tasks(context.bot, user_id)
 
 
-# ---------------- WEEK ----------------
-
-async def show_week(message):
+# ---------- CORE FUNCTION ----------
+async def send_upcoming_tasks(bot, user_id):
 
     today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
-    end = today + timedelta(days=7)
+    end_date = today + timedelta(days=7)
 
     cursor.execute("""
-    SELECT task, task_date FROM tasks
-    WHERE task_date BETWEEN ? AND ?
-    AND status='pending'
-    ORDER BY task_date
+        SELECT task, task_date FROM tasks
+        WHERE user_id = ?
+        AND task_date BETWEEN ? AND ?
+        ORDER BY task_date ASC
     """, (
+        user_id,
         today.strftime("%Y-%m-%d"),
-        end.strftime("%Y-%m-%d")
+        end_date.strftime("%Y-%m-%d")
     ))
 
     rows = cursor.fetchall()
 
     if not rows:
-        await message.reply_text("No tasks next 7 days 🎉")
+
+        await bot.send_message(
+            chat_id=user_id,
+            text="No tasks in next 7 days 🎉"
+        )
         return
 
-    msg = "Next 7 Days\n\n"
+    message = "🌅 Good morning!\n\nYour next 7 days tasks:\n\n"
 
     for task, date in rows:
 
-        formatted = datetime.strptime(date, "%Y-%m-%d").strftime("%d %b")
-        msg += f"{formatted} - {task}\n"
+        formatted_date = datetime.strptime(
+            date, "%Y-%m-%d"
+        ).strftime("%d %b")
 
-    await message.reply_text(msg)
+        message += f"{formatted_date} - {task}\n"
 
-
-# ---------------- EDIT ----------------
-
-async def edit_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    query = update.callback_query
-    await query.answer()
-
-    task_id = query.data.split("_")[1]
-
-    context.user_data["state"] = "editing"
-    context.user_data["edit_id"] = task_id
-
-    await query.message.reply_text("Send new task text")
+    await bot.send_message(chat_id=user_id, text=message)
 
 
-# ---------------- DONE ----------------
+# ---------- DAILY JOB ----------
+async def morning_reminder(context: ContextTypes.DEFAULT_TYPE):
 
-async def done_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cursor.execute("SELECT user_id FROM users")
+    users = cursor.fetchall()
 
-    query = update.callback_query
-    await query.answer()
+    for (user_id,) in users:
 
-    task_id = query.data.split("_")[1]
-
-    cursor.execute(
-        "UPDATE tasks SET status='completed' WHERE id=?",
-        (task_id,)
-    )
-
-    conn.commit()
-
-    await query.edit_message_text("Task completed ✅")
+        await send_upcoming_tasks(context.bot, user_id)
 
 
-# ---------------- REMINDER ----------------
-
-async def reminder(context):
-
-    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
-
-    cursor.execute("""
-    SELECT user_id, task FROM tasks
-    WHERE task_date=? AND status='pending'
-    """, (today.strftime("%Y-%m-%d"),))
-
-    rows = cursor.fetchall()
-
-    for user_id, task in rows:
-
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"Reminder 🔔\n\n{task}"
-        )
-
-
-# ---------------- EVENING CHECK ----------------
-
-async def evening_check(context):
-
-    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
-
-    cursor.execute("""
-    SELECT id, user_id, task FROM tasks
-    WHERE task_date=? AND status='pending'
-    """, (today.strftime("%Y-%m-%d"),))
-
-    rows = cursor.fetchall()
-
-    for task_id, user_id, task in rows:
-
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Done", callback_data=f"done_{task_id}")]
-        ])
-
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=f"Did you finish?\n\n{task}",
-            reply_markup=keyboard
-        )
-
-
-# ---------------- SCHEDULER ----------------
-
+# ---------- START SCHEDULER ----------
 async def post_init(application):
 
-    scheduler = AsyncIOScheduler(timezone=ZoneInfo("Asia/Kolkata"))
-
-    scheduler.add_job(
-        reminder,
-        "cron",
-        hour=18,
-        minute=0,
-        args=[application]
+    scheduler = AsyncIOScheduler(
+        timezone=ZoneInfo("Asia/Kolkata")
     )
 
     scheduler.add_job(
-        evening_check,
+        morning_reminder,
         "cron",
-        hour=21,
+        hour=7,
         minute=0,
-        args=[application]
+        args=[application],
     )
 
     scheduler.start()
 
 
-# ---------------- APP ----------------
-
+# ---------- APP ----------
 app = (
     ApplicationBuilder()
     .token(TOKEN)
@@ -327,15 +164,14 @@ app = (
     .build()
 )
 
-app.add_handler(CommandHandler("start", start))
+app.add_handler(
+    MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+)
 
-app.add_handler(CallbackQueryHandler(menu_handler, pattern="^(add|today|week)$"))
-app.add_handler(CallbackQueryHandler(edit_handler, pattern="^edit_"))
-app.add_handler(CallbackQueryHandler(done_handler, pattern="^done_"))
+app.add_handler(
+    CommandHandler("week", week_tasks)
+)
 
-app.add_handler(CallbackQueryHandler(calendar_handler, pattern="^calendar"))
+print("Bot is running...")
 
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
-
-print("Bot running...")
 app.run_polling()
