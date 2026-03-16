@@ -38,57 +38,209 @@ CREATE TABLE IF NOT EXISTS users (
 
 conn.commit()
 
+# ---------- USER STATES ----------
+user_mode = {}
 
-# ---------- SAVE TASK ----------
+# ---------- START ----------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user_id = update.message.from_user.id
+
+    user_mode[user_id] = "menu"
+
+    await update.message.reply_text(
+        "Welcome!\n\n"
+        "Choose an option:\n\n"
+        "1️⃣ Add Task\n"
+        "2️⃣ View Today\n"
+        "3️⃣ View Month\n"
+        "4️⃣ View Year\n\n"
+        "Reply with 1 / 2 / 3 / 4"
+    )
+
+
+# ---------- MESSAGE HANDLER ----------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_text = update.message.text
     user_id = update.message.from_user.id
 
-    cursor.execute(
-        "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
-        (user_id,)
-    )
+    cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
     conn.commit()
 
-    try:
-        parts = user_text.split("-", 1)
+    mode = user_mode.get(user_id, None)
 
-        date_part = parts[0].strip()
-        task_part = parts[1].strip()
+    # ---------- MENU ----------
+    if mode == "menu":
 
-        task_date = datetime.strptime(date_part, "%d %b %Y")
+        if user_text == "1":
 
-        cursor.execute(
-            "INSERT INTO tasks (user_id, task, task_date) VALUES (?, ?, ?)",
-            (
-                user_id,
-                task_part,
-                task_date.strftime("%Y-%m-%d")
+            user_mode[user_id] = "add_task"
+
+            await update.message.reply_text(
+                "Send task in format:\n\n"
+                "24 Feb 2026 - Pay EB bill"
             )
-        )
+            return
 
-        conn.commit()
+        elif user_text == "2":
 
-        await update.message.reply_text("Task saved ✅")
+            await show_today(update, user_id)
+            return
 
-    except Exception:
+        elif user_text == "3":
 
-        await update.message.reply_text(
-            "Send in this format:\n\n24 Feb 2026 - Pay EB bill"
-        )
+            await show_month(update, user_id)
+            return
+
+        elif user_text == "4":
+
+            await show_year(update, user_id)
+            return
+
+    # ---------- ADD TASK ----------
+    if mode == "add_task":
+
+        try:
+
+            parts = user_text.split("-", 1)
+
+            date_part = parts[0].strip()
+            task_part = parts[1].strip()
+
+            task_date = datetime.strptime(date_part, "%d %b %Y")
+
+            cursor.execute(
+                "INSERT INTO tasks (user_id, task, task_date) VALUES (?, ?, ?)",
+                (
+                    user_id,
+                    task_part,
+                    task_date.strftime("%Y-%m-%d")
+                )
+            )
+
+            conn.commit()
+
+            await update.message.reply_text("Task saved ✅")
+
+        except Exception:
+
+            await update.message.reply_text(
+                "Send in this format:\n\n"
+                "24 Feb 2026 - Pay EB bill"
+            )
+
+
+# ---------- TODAY ----------
+async def show_today(update, user_id):
+
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+
+    cursor.execute("""
+        SELECT task FROM tasks
+        WHERE user_id = ?
+        AND task_date = ?
+    """, (
+        user_id,
+        today.strftime("%Y-%m-%d")
+    ))
+
+    rows = cursor.fetchall()
+
+    if not rows:
+
+        await update.message.reply_text("No tasks today 🎉")
+        return
+
+    message = "Today's Tasks:\n\n"
+
+    for (task,) in rows:
+
+        message += f"• {task}\n"
+
+    await update.message.reply_text(message)
+
+
+# ---------- MONTH ----------
+async def show_month(update, user_id):
+
+    now = datetime.now(ZoneInfo("Asia/Kolkata"))
+
+    start = now.replace(day=1).date()
+
+    end = (start + timedelta(days=31)).replace(day=1)
+
+    cursor.execute("""
+        SELECT task, task_date FROM tasks
+        WHERE user_id = ?
+        AND task_date BETWEEN ? AND ?
+        ORDER BY task_date
+    """, (
+        user_id,
+        start.strftime("%Y-%m-%d"),
+        end.strftime("%Y-%m-%d")
+    ))
+
+    rows = cursor.fetchall()
+
+    if not rows:
+
+        await update.message.reply_text("No tasks this month 🎉")
+        return
+
+    message = "This Month:\n\n"
+
+    for task, date in rows:
+
+        formatted = datetime.strptime(date, "%Y-%m-%d").strftime("%d %b")
+
+        message += f"{formatted} - {task}\n"
+
+    await update.message.reply_text(message)
+
+
+# ---------- YEAR ----------
+async def show_year(update, user_id):
+
+    now = datetime.now(ZoneInfo("Asia/Kolkata"))
+
+    start = now.replace(month=1, day=1).date()
+
+    end = now.replace(month=12, day=31).date()
+
+    cursor.execute("""
+        SELECT task, task_date FROM tasks
+        WHERE user_id = ?
+        AND task_date BETWEEN ? AND ?
+        ORDER BY task_date
+    """, (
+        user_id,
+        start.strftime("%Y-%m-%d"),
+        end.strftime("%Y-%m-%d")
+    ))
+
+    rows = cursor.fetchall()
+
+    if not rows:
+
+        await update.message.reply_text("No tasks this year 🎉")
+        return
+
+    message = "This Year:\n\n"
+
+    for task, date in rows:
+
+        formatted = datetime.strptime(date, "%Y-%m-%d").strftime("%d %b")
+
+        message += f"{formatted} - {task}\n"
+
+    await update.message.reply_text(message)
 
 
 # ---------- WEEK COMMAND ----------
 async def week_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.message.from_user.id
-
-    await send_upcoming_tasks(context.bot, user_id)
-
-
-# ---------- CORE FUNCTION ----------
-async def send_upcoming_tasks(bot, user_id):
 
     today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
     end_date = today + timedelta(days=7)
@@ -108,23 +260,18 @@ async def send_upcoming_tasks(bot, user_id):
 
     if not rows:
 
-        await bot.send_message(
-            chat_id=user_id,
-            text="No tasks in next 7 days 🎉"
-        )
+        await update.message.reply_text("No tasks in next 7 days 🎉")
         return
 
-    message = "🌅 Good morning!\n\nYour next 7 days tasks:\n\n"
+    message = "Next 7 Days:\n\n"
 
     for task, date in rows:
 
-        formatted_date = datetime.strptime(
-            date, "%Y-%m-%d"
-        ).strftime("%d %b")
+        formatted_date = datetime.strptime(date, "%Y-%m-%d").strftime("%d %b")
 
         message += f"{formatted_date} - {task}\n"
 
-    await bot.send_message(chat_id=user_id, text=message)
+    await update.message.reply_text(message)
 
 
 # ---------- DAILY JOB ----------
@@ -135,15 +282,45 @@ async def morning_reminder(context: ContextTypes.DEFAULT_TYPE):
 
     for (user_id,) in users:
 
-        await send_upcoming_tasks(context.bot, user_id)
+        await week_tasks_manual(context.bot, user_id)
 
 
-# ---------- START SCHEDULER ----------
+async def week_tasks_manual(bot, user_id):
+
+    today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+    end_date = today + timedelta(days=7)
+
+    cursor.execute("""
+        SELECT task, task_date FROM tasks
+        WHERE user_id = ?
+        AND task_date BETWEEN ? AND ?
+        ORDER BY task_date ASC
+    """, (
+        user_id,
+        today.strftime("%Y-%m-%d"),
+        end_date.strftime("%Y-%m-%d")
+    ))
+
+    rows = cursor.fetchall()
+
+    if not rows:
+        return
+
+    message = "🌅 Good morning!\n\nYour next 7 days tasks:\n\n"
+
+    for task, date in rows:
+
+        formatted_date = datetime.strptime(date, "%Y-%m-%d").strftime("%d %b")
+
+        message += f"{formatted_date} - {task}\n"
+
+    await bot.send_message(chat_id=user_id, text=message)
+
+
+# ---------- SCHEDULER ----------
 async def post_init(application):
 
-    scheduler = AsyncIOScheduler(
-        timezone=ZoneInfo("Asia/Kolkata")
-    )
+    scheduler = AsyncIOScheduler(timezone=ZoneInfo("Asia/Kolkata"))
 
     scheduler.add_job(
         morning_reminder,
@@ -164,13 +341,13 @@ app = (
     .build()
 )
 
+app.add_handler(CommandHandler("start", start))
+
 app.add_handler(
     MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
 )
 
-app.add_handler(
-    CommandHandler("week", week_tasks)
-)
+app.add_handler(CommandHandler("week", week_tasks))
 
 print("Bot is running...")
 
