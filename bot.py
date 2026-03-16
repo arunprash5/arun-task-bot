@@ -3,7 +3,7 @@ import sqlite3
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     MessageHandler,
@@ -13,7 +13,6 @@ from telegram.ext import (
 )
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
 
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -38,26 +37,26 @@ CREATE TABLE IF NOT EXISTS users (
 
 conn.commit()
 
-# ---------- USER STATES ----------
-user_mode = {}
+# ---------- KEYBOARD ----------
+menu_keyboard = ReplyKeyboardMarkup(
+    [
+        ["Add Task"],
+        ["View Today", "View Month", "View Year"]
+    ],
+    resize_keyboard=True
+)
 
 # ---------- START ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    user_id = update.message.from_user.id
-
-    user_mode[user_id] = "menu"
-
     await update.message.reply_text(
         "Welcome!\n\n"
-        "Choose an option:\n\n"
-        "1️⃣ Add Task\n"
-        "2️⃣ View Today\n"
-        "3️⃣ View Month\n"
-        "4️⃣ View Year\n\n"
-        "Reply with 1 / 2 / 3 / 4"
+        "You can:\n"
+        "• Use buttons below\n"
+        "• Or type task directly like:\n\n"
+        "24 Mar 2026 - Pay EB bill",
+        reply_markup=menu_keyboard
     )
-
 
 # ---------- MESSAGE HANDLER ----------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -68,68 +67,56 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
     conn.commit()
 
-    mode = user_mode.get(user_id, None)
+    # ---------- BUTTONS ----------
+    if user_text == "Add Task":
 
-    # ---------- MENU ----------
-    if mode == "menu":
+        await update.message.reply_text(
+            "Send task in format:\n\n"
+            "24 Mar 2026 - Pay EB bill"
+        )
+        return
 
-        if user_text == "1":
+    elif user_text == "View Today":
 
-            user_mode[user_id] = "add_task"
+        await show_today(update, user_id)
+        return
 
-            await update.message.reply_text(
-                "Send task in format:\n\n"
-                "24 Feb 2026 - Pay EB bill"
-            )
-            return
+    elif user_text == "View Month":
 
-        elif user_text == "2":
+        await show_month(update, user_id)
+        return
 
-            await show_today(update, user_id)
-            return
+    elif user_text == "View Year":
 
-        elif user_text == "3":
+        await show_year(update, user_id)
+        return
 
-            await show_month(update, user_id)
-            return
+    # ---------- DIRECT TASK ENTRY ----------
+    try:
 
-        elif user_text == "4":
+        parts = user_text.split("-", 1)
 
-            await show_year(update, user_id)
-            return
+        date_part = parts[0].strip()
+        task_part = parts[1].strip()
 
-    # ---------- ADD TASK ----------
-    if mode == "add_task":
+        task_date = datetime.strptime(date_part, "%d %b %Y")
 
-        try:
+        cursor.execute(
+            "INSERT INTO tasks (user_id, task, task_date) VALUES (?, ?, ?)",
+            (user_id, task_part, task_date.strftime("%Y-%m-%d"))
+        )
 
-            parts = user_text.split("-", 1)
+        conn.commit()
 
-            date_part = parts[0].strip()
-            task_part = parts[1].strip()
+        await update.message.reply_text("Task saved ✅")
 
-            task_date = datetime.strptime(date_part, "%d %b %Y")
+    except Exception:
 
-            cursor.execute(
-                "INSERT INTO tasks (user_id, task, task_date) VALUES (?, ?, ?)",
-                (
-                    user_id,
-                    task_part,
-                    task_date.strftime("%Y-%m-%d")
-                )
-            )
-
-            conn.commit()
-
-            await update.message.reply_text("Task saved ✅")
-
-        except Exception:
-
-            await update.message.reply_text(
-                "Send in this format:\n\n"
-                "24 Feb 2026 - Pay EB bill"
-            )
-
+        await update.message.reply_text(
+            "Invalid format.\n\n"
+            "Example:\n"
+            "24 Mar 2026 - Pay EB bill"
+        )
 
 # ---------- TODAY ----------
 async def show_today(update, user_id):
@@ -160,14 +147,12 @@ async def show_today(update, user_id):
 
     await update.message.reply_text(message)
 
-
 # ---------- MONTH ----------
 async def show_month(update, user_id):
 
     now = datetime.now(ZoneInfo("Asia/Kolkata"))
 
     start = now.replace(day=1).date()
-
     end = (start + timedelta(days=31)).replace(day=1)
 
     cursor.execute("""
@@ -198,14 +183,12 @@ async def show_month(update, user_id):
 
     await update.message.reply_text(message)
 
-
 # ---------- YEAR ----------
 async def show_year(update, user_id):
 
     now = datetime.now(ZoneInfo("Asia/Kolkata"))
 
     start = now.replace(month=1, day=1).date()
-
     end = now.replace(month=12, day=31).date()
 
     cursor.execute("""
@@ -235,7 +218,6 @@ async def show_year(update, user_id):
         message += f"{formatted} - {task}\n"
 
     await update.message.reply_text(message)
-
 
 # ---------- WEEK COMMAND ----------
 async def week_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -273,7 +255,6 @@ async def week_tasks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(message)
 
-
 # ---------- DAILY JOB ----------
 async def morning_reminder(context: ContextTypes.DEFAULT_TYPE):
 
@@ -282,10 +263,9 @@ async def morning_reminder(context: ContextTypes.DEFAULT_TYPE):
 
     for (user_id,) in users:
 
-        await week_tasks_manual(context.bot, user_id)
+        await send_upcoming_tasks(context.bot, user_id)
 
-
-async def week_tasks_manual(bot, user_id):
+async def send_upcoming_tasks(bot, user_id):
 
     today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
     end_date = today + timedelta(days=7)
@@ -316,7 +296,6 @@ async def week_tasks_manual(bot, user_id):
 
     await bot.send_message(chat_id=user_id, text=message)
 
-
 # ---------- SCHEDULER ----------
 async def post_init(application):
 
@@ -331,7 +310,6 @@ async def post_init(application):
     )
 
     scheduler.start()
-
 
 # ---------- APP ----------
 app = (
@@ -351,4 +329,4 @@ app.add_handler(CommandHandler("week", week_tasks))
 
 print("Bot is running...")
 
-app.run_polling()
+app.run_polling(drop_pending_updates=True)
